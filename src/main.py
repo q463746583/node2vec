@@ -25,7 +25,7 @@ def parse_args():
 	parser.add_argument('--input', nargs='?', default='graph/karate.edgelist',
 	                    help='Input graph path')
 
-	parser.add_argument('--output', nargs='?', default='emb/test.emb',
+	parser.add_argument('--output', nargs='?', default='emb/test2.emb',
 	                    help='Embeddings path')
 
 	parser.add_argument('--dimensions', type=int, default=128,
@@ -96,10 +96,11 @@ def to_one_hot(data_point_index, vocab_size):
     temp[data_point_index - 1] = 1
     return temp
 
-def learn_embeddings_modify(walks, vocab_size):
+def learn_embeddings_modify(walks, nodes):
 	'''
 	Implement the embedding method via tensorflow 
 	'''
+	vocab_size = len(nodes)
 	data = []
 	# walks = [list(map(str, walk)) for walk in walks]
 	for walk in walks:
@@ -136,22 +137,28 @@ def learn_embeddings_modify(walks, vocab_size):
 	b2 = tf.Variable(tf.random_normal([vocab_size]))
 	prediction = tf.nn.softmax(tf.add( tf.matmul(hidden_representation, W2), b2))
 
-	sess = tf.Session()
-	init = tf.global_variables_initializer()
-	sess.run(init) #make sure you do this!
-	# define the loss function:
-	cross_entropy_loss = tf.reduce_mean(-tf.reduce_sum(y_label * tf.log(prediction), reduction_indices=[1]))
-	# define the training step:
-	train_step = tf.train.GradientDescentOptimizer(0.1).minimize(cross_entropy_loss)
-	n_iters = args.iter
-	# train for n_iter iterations
-	for _ in range(n_iters):
-		sess.run(train_step, feed_dict={x: x_train, y_label: y_train})
-		# print('loss is : ', sess.run(cross_entropy_loss, feed_dict={x: x_train, y_label: y_train}))
-	print(sess.run(W1 + b1))
-			
+	with tf.Session() as sess: 
+		init = tf.global_variables_initializer()
+		sess.run(init) #make sure you do this!
+		# define the loss function:
+		cross_entropy_loss = tf.reduce_mean(-tf.reduce_sum(y_label * tf.log(prediction), reduction_indices=[1]))
+		# define the training step:
+		train_step = tf.train.GradientDescentOptimizer(0.1).minimize(cross_entropy_loss)
+		n_iters = args.iter
+		# train for n_iter iterations
+		for _ in range(n_iters):
+			sess.run(train_step, feed_dict={x: x_train, y_label: y_train})
+			# print('loss is : ', sess.run(cross_entropy_loss, feed_dict={x: x_train, y_label: y_train}))
+
+		vectors = (sess.run(W1 + b1))
+		f = open(args.output, "w+")
+		f.write(str(vocab_size) + " " +  str(EMBEDDING_DIM) + "\n")
+		for i in range(vocab_size):
+			f.write(str(list(nodes)[i]) + " " + ' '.join(str(e) for e in vectors.tolist()[i]) + "\n")
+		f.close()	
+		print(vectors)
 	
-	 
+	  
 
 
 def main(args):
@@ -159,10 +166,11 @@ def main(args):
 	Pipeline for representational learning for all nodes in a graph.
 	'''
 	nx_G = read_graph()
+	print(nx_G.nodes())
 	G = node2vec.Graph(nx_G, args.directed, args.p, args.q)
 	G.preprocess_transition_probs()
 	walks = G.simulate_walks(args.num_walks, args.walk_length)
-	learn_embeddings_modify(walks, len(nx_G.nodes()))
+	learn_embeddings_modify(walks, nx_G.nodes())
 	#learn_embeddings(walks)
 
 if __name__ == "__main__":
