@@ -30,7 +30,7 @@ def parse_args():
 	'''
 	parser = argparse.ArgumentParser(description="Run node2vec.")
 
-	parser.add_argument('--input', nargs='?', default='graph/month_1_graph.edgelist',
+	parser.add_argument('--input', nargs='?', default='graph/month_2_graph.edgelist',
 	                    help='Input graph path')
 
 	parser.add_argument('--output', nargs='?', default='emb/test2.emb',
@@ -167,8 +167,10 @@ def learn_embeddings_tensorflow(walks, nodes):
 			train_inputs = tf.placeholder(tf.int32, shape=[batch_size])
 			train_labels = tf.placeholder(tf.int32, shape=[batch_size, 1])
 
-	 # Ops and variables pinned to the CPU because of missing GPU implementation
-		with tf.device('/cpu:0'):
+	 # Ops and variables pinned to the CPU because of missing GPU implementation	
+		
+		# with tf.device('/cpu:0'):
+		with tf.device('/gpu:0'):
 			# Look up embeddings for inputs.
 			with tf.name_scope('embeddings'):
 				embeddings = tf.Variable(
@@ -219,6 +221,7 @@ def learn_embeddings_tensorflow(walks, nodes):
 
 		# Create a saver.
 		saver = tf.train.Saver()
+
 
 	with tf.Session(graph=graph) as session:
 		# Open a writer to write summaries.
