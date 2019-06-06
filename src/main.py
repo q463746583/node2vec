@@ -15,6 +15,14 @@ import networkx as nx
 import node2vec
 from gensim.models import Word2Vec
 import tensorflow as tf
+import math 
+import collections
+import random
+
+data_index = 0
+walk_index = 0
+node_to_index = dict()
+index_to_node = dict()
 
 def parse_args():
 	'''
@@ -22,7 +30,7 @@ def parse_args():
 	'''
 	parser = argparse.ArgumentParser(description="Run node2vec.")
 
-	parser.add_argument('--input', nargs='?', default='graph/karate.edgelist',
+	parser.add_argument('--input', nargs='?', default='graph/month_1_graph.edgelist',
 	                    help='Input graph path')
 
 	parser.add_argument('--output', nargs='?', default='emb/test2.emb',
@@ -77,7 +85,6 @@ def read_graph():
 
 	if not args.directed:
 		G = G.to_undirected()
-
 	return G
 
 def learn_embeddings(walks):
@@ -95,6 +102,192 @@ def to_one_hot(data_point_index, vocab_size):
     temp = np.zeros(vocab_size)
     temp[data_point_index - 1] = 1
     return temp
+
+def generate_batch(batch_size, num_skips, skip_window, data):
+	global data_index
+	global walk_index 
+	assert batch_size % num_skips == 0
+	assert num_skips <= 2 * skip_window
+	batch = np.ndarray(shape=(batch_size), dtype=np.int32)
+	labels = np.ndarray(shape=(batch_size, 1), dtype=np.int32)
+	span = 2 * skip_window + 1  # [ skip_window target skip_window ]
+	buffer = collections.deque(maxlen=span)  # pylint: disable=redefined-builtin
+	if data_index + span > len(data):
+		data_index = 0
+	buffer.extend(data[data_index:data_index + span])
+	# if data_index - skip_window < 0:
+	# 	buffer.extend(data[0 : data_index])
+	# else:
+	# 	buffer.exntend(data[data_index-skip_window : data_index])
+	# if data_index + skip_window + 1 >= args.walk_length:
+	# 	buffer.exnted(data[data_index + 1 : args.walk_length - 1])
+	# else:
+	# 	buffer.extned(data[data_index + 1 : data_index + skip_window + 1])
+	
+	data_index += span
+	
+	for i in range(batch_size // num_skips):
+		context_words = [w for w in range(span) if w != skip_window]
+		words_to_use = random.sample(context_words, num_skips)
+		for j, context_word in enumerate(words_to_use):
+			batch[i * num_skips + j] = node_to_index[buffer[skip_window]]
+			labels[i * num_skips + j, 0] = node_to_index[buffer[context_word]]
+		if data_index == len(data):
+			buffer.extend(data[0:span])
+			data_index = span
+		else:
+			buffer.append(data[data_index])
+			data_index += 1
+	
+	# Backtrack a little bit to avoid skipping words in the end of a batch
+	data_index = (data_index + len(data) - span) % len(data)
+	return batch, labels
+
+
+
+def learn_embeddings_tensorflow(walks, nodes):
+	global index_to_node
+	global node_to_index
+	# Parameters to learn
+	
+	for index, n in enumerate(nodes):
+		index_to_node[index] = n
+		node_to_index[n] = index 
+
+	vocabulary_size = len(nodes)
+	window_size = args.window_size
+	batch_size = 100
+	num_sampled = 64
+	embedding_size = args.dimensions 
+
+	graph = tf.Graph()
+	with graph.as_default():
+		# Input data.
+		with tf.name_scope('inputs'):
+			train_inputs = tf.placeholder(tf.int32, shape=[batch_size])
+			train_labels = tf.placeholder(tf.int32, shape=[batch_size, 1])
+
+	 # Ops and variables pinned to the CPU because of missing GPU implementation
+		with tf.device('/cpu:0'):
+			# Look up embeddings for inputs.
+			with tf.name_scope('embeddings'):
+				embeddings = tf.Variable(
+					tf.random_uniform([vocabulary_size, embedding_size], -1.0, 1.0))
+				embed = tf.nn.embedding_lookup(embeddings, train_inputs)
+
+		# Construct the variables for the NCE loss
+		with tf.name_scope('weights'):
+			nce_weights = tf.Variable(
+				tf.truncated_normal([vocabulary_size, embedding_size],
+									stddev=1.0 / math.sqrt(embedding_size)))
+		with tf.name_scope('biases'):
+			nce_biases = tf.Variable(tf.zeros([vocabulary_size]))
+
+		 # Compute the average NCE loss for the batch.
+		# tf.nce_loss automatically draws a new sample of the negative labels each
+		# time we evaluate the loss.
+		# Explanation of the meaning of NCE loss:
+		#   http://mccormickml.com/2016/04/19/word2vec-tutorial-the-skip-gram-model/
+		with tf.name_scope('loss'):
+			loss = tf.reduce_mean(
+				tf.nn.nce_loss(
+					weights=nce_weights,
+					biases=nce_biases,
+					labels=train_labels,
+					inputs=embed,
+					num_sampled=num_sampled,
+					num_classes=vocabulary_size))
+		
+		# Add the loss value as a scalar to summary.
+		tf.summary.scalar('loss', loss)
+
+		# Construct the SGD optimizer using a learning rate of 1.0.
+		with tf.name_scope('optimizer'):
+			optimizer = tf.train.GradientDescentOptimizer(1.0).minimize(loss)
+
+
+		# Compute the cosine similarity between minibatch examples and all
+		# embeddings.
+		norm = tf.sqrt(tf.reduce_sum(tf.square(embeddings), 1, keepdims=True))
+		normalized_embeddings = embeddings / norm
+		
+		# Merge all summaries.
+		merged = tf.summary.merge_all()
+
+		# Add variable initializer.
+		init = tf.global_variables_initializer()
+
+		# Create a saver.
+		saver = tf.train.Saver()
+
+	with tf.Session(graph=graph) as session:
+		# Open a writer to write summaries.
+		#  writer = tf.summary.FileWriter(log_dir, session.graph)
+
+		# We must initialize all variables before we use them.
+		init.run()
+		print('Initialized')
+		average_loss = 0
+
+		walks_data = []
+		for w in walks:
+			for n in w: 
+				walks_data.append(n)
+
+		for step in range(args.iter):
+			
+			batch_inputs, batch_labels = generate_batch(batch_size, 1,
+														window_size, walks_data)
+			print("@@@@@@@@@@", batch_inputs)
+			print("**********", batch_labels)
+			feed_dict = {train_inputs: batch_inputs, train_labels: batch_labels}
+			# Define metadata variable.
+			run_metadata = tf.RunMetadata()
+
+			# We perform one update step by evaluating the optimizer op (including it
+			# in the list of returned values for session.run()
+			# Also, evaluate the merged op to get all summaries from the returned
+			# "summary" variable. Feed metadata variable to session for visualizing
+			# the graph in TensorBoard.
+			_, summary, loss_val = session.run([optimizer, merged, loss],
+												feed_dict=feed_dict,
+												run_metadata=run_metadata)
+			average_loss += loss_val
+
+			if step % 2000 == 0:
+				if step > 0:
+					average_loss /= 2000
+					# The average loss is an estimate of the loss over the last 2000
+					# batches.
+					print('Average loss at step ', step, ': ', average_loss)
+					average_loss = 0
+
+		final_embeddings = normalized_embeddings.eval()
+		print(final_embeddings)
+		print(len(final_embeddings), len(final_embeddings[0]))
+
+
+	# node_embeddings = tf.Variable(tf.random_uniform([num_nodes, embedding_size], -1.0, 1.0, dtype=tf.dtypes.float32))
+	# softmax_weights = tf.Variable(tf.truncated_normal([num_nodes, embedding_size],stddev=1.0 / math.sqrt(embedding_size)))
+	# softmax_biases = tf.Variable(tf.zeros([num_nodes]))
+
+	# # Input data and re-orgenize size.
+	# with tf.name_scope("context_node") as scope:
+	# 	#context nodes to each input node in the batch (e.g [[1,2],[4,6],[5,7]] where batch_size = 3,context_size=3)
+	# 	train_context_node= tf.placeholder(tf.int32, shape=[batch_size,context_size],name="context_node")
+	# 	#orgenize prediction labels (skip-gram model predicts context nodes (i.e labels) given a input node)
+	# 	#i.e make [[1,2,4,6,5,7]] given context above. The redundant dimention is just for restriction on tensorflow API.
+	# 	train_context_node_flat=tf.reshape(train_context_node,[-1,1])
+	# with tf.name_scope("input_node") as scope:
+	# 	#batch input node to the network(e.g [2,1,3] where batch_size = 3)
+	# 	train_input_node= tf.placeholder(tf.int32, shape=[batch_size],name="input_node")
+	# 	#orgenize input as flat. i.e we want to make [2,2,2,1,1,1,3,3,3] given the  input nodes above
+	# 	input_ones=tf.ones_like(train_context_node)
+	# 	train_input_node_flat=tf.reshape(tf.multiply(input_ones,tf.reshape(train_input_node,[-1,1])),[-1])
+
+
+
+
 
 def learn_embeddings_modify(walks, nodes):
 	'''
@@ -170,8 +363,9 @@ def main(args):
 	G = node2vec.Graph(nx_G, args.directed, args.p, args.q)
 	G.preprocess_transition_probs()
 	walks = G.simulate_walks(args.num_walks, args.walk_length)
-	learn_embeddings_modify(walks, nx_G.nodes())
-	#learn_embeddings(walks)
+	learn_embeddings_tensorflow(walks, nx_G.nodes())
+	# learn_embeddings_modify(walks, nx_G.nodes())
+	# learn_embeddings(walks)
 
 if __name__ == "__main__":
 	args = parse_args()
