@@ -182,8 +182,8 @@ def learn_embeddings_tensorflow(walks, nodes):
             train_inputs = tf.placeholder(tf.int32, shape=[batch_size])
             train_labels = tf.placeholder(tf.int32, shape=[batch_size, 1])
     
-        for i in range(1,5):
-            with tf.device(tf.DeviceSpec(device_type="GPU", device_index=random.randint(1,7))):
+        for i in range(1,7):
+            with tf.device(tf.DeviceSpec(device_type="GPU", device_index=i)):
                 # with tf.device('/cpu:0'):
                 # with tf.device("/device:GPU:0"):
                     # Look up embeddings for inputs.
